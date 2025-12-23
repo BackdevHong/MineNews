@@ -7,14 +7,28 @@ export function useSnapshot() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let mounted = true;
+
     fetch("/api/snapshot/latest")
-      .then(res => {
-        if (!res.ok) throw new Error("Snapshot fetch failed");
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`Snapshot fetch failed (${res.status})`);
+        }
         return res.json();
       })
-      .then(setData)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false));
+      .then((json: Snapshot) => {
+        if (mounted) setData(json);
+      })
+      .catch((e: Error) => {
+        if (mounted) setError(e.message);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   return { data, loading, error };

@@ -162,10 +162,10 @@ async function summarizeTop5WithOpenAI({ sortName, sortId, top5 }) {
   const slim = {
     sortName,
     sortId,
-    top5: top5.map(g => ({
+    games: top5.map(g => ({
       universeId: g.universeId,
       name: g.name,
-      description: clampDesc(g.description),
+      description: clampDesc(g.description, 1200), // 본문에 쓸 수 있으니 좀 더 길게
       playing: g.playing,
       visits: g.visits,
       favorites: g.favorites,
@@ -178,39 +178,59 @@ async function summarizeTop5WithOpenAI({ sortName, sortId, top5 }) {
 
   const res = await openai.responses.create({
     model: "gpt-5",
-    reasoning: { effort: "low" }, // ✅ 핵심
-    instructions: [
-      "너는 Roblox 지표 기반 주간 게임 뉴스 편집장이다.",
-      "과장/추측 금지. 제공된 수치/설명 텍스트만 근거로 한국어로 작성.",
-      "반드시 아래 형식만 출력해:",
-      "• 헤드라인 3개",
-      "1. 게임명 — 한 줄 요약",
-      "2. ...",
-      "3. ...",
-      "4. ...",
-      "5. ...",
-      "형식 외 문장 금지. 이모지 금지.",
-    ].join("\n"),
-    input: [
-      {
-        role: "user",
-        content: JSON.stringify(slim),
-      },
-    ],
+    reasoning: { effort: "low" },
+    instructions: `
+너는 Roblox 주간 게임 신문 편집장이다.
+
+절대 규칙:
+- 추측/과장/미래예측 금지
+- 제공된 description 텍스트 + 수치만 근거로 작성
+- description에 없는 특징을 만들어내지 말 것
+- 한국어로 작성
+
+출력은 "반드시 JSON만" 반환한다. (설명/코드블록/여는말/닫는말 금지)
+
+반환 JSON 스키마:
+{
+  "headlines": ["...", "...", "..."],  // 신문 전체 헤드라인(흥미 유발)
+  "articles": [
+    {
+      "universeId": 0,
+      "gameName": "...",
+      "title": "...",     // 재밌는 기사 제목
+      "oneLiner": "...",  // 한 줄 설명(신문 리드문)
+      "body": "..."       // 본문(2~5문단, 너무 길지 않게)
+    }
+  ]
+}
+
+작성 팁:
+- title은 신문 제목처럼 짧고 임팩트 있게(말장난/비유 가능, 그러나 과장 금지)
+- oneLiner는 description을 한 줄로 압축(핵심 장르/플레이 경험)
+- body는 description에서 뽑은 요소들을 신문 톤으로 정리(게임 소개 + 특징 + 플레이 포인트)
+`.trim(),
+    input: [{ role: "user", content: JSON.stringify(slim) }],
   });
 
-  const text = extractTextFromResponse(res);
+  const raw = extractTextFromResponse(res);
 
-  // 상태 체크: incomplete면 토큰/reasoning 문제 재발
-  if (!text) {
-    console.warn("⚠️ AI summary empty:", {
-      status: res?.status,
-      incomplete: res?.incomplete_details,
-      usage: res?.usage,
-    });
+  if (!raw) {
+    console.warn("⚠️ AI JSON empty:", { status: res?.status, incomplete: res?.incomplete_details, usage: res?.usage });
+    return null;
   }
 
-  return text;
+  // ✅ JSON 파싱/검증
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    console.error("❌ AI JSON parse failed. raw:", raw.slice(0, 500));
+    return null;
+  }
+
+  // 최소 검증
+  if (!Array.isArray(parsed?.articles)) return null;
+  return parsed;
 }
 
 function kstDateKey(d = new Date()) {
@@ -317,17 +337,61 @@ async function generateSnapshot() {
     };
   });
 
-  const aiText = await summarizeTop5WithOpenAI({
+  // ✅ AI는 "텍스트"가 아니라 "JSON(헤드라인+기사들)"로 받는 걸 권장
+  const ai = await summarizeTop5WithOpenAI({
     sortName: picked.sortName,
     sortId: picked.sortId,
     top5: enriched,
+  });
+  // ai 예시: { headlines: string[], articles: [{ universeId, gameName, title, oneLiner, body }] }
+
+  // ✅ AI 실패해도 서비스는 살아야 하니 fallback 준비
+  const headlines = Array.isArray(ai?.headlines) ? ai.headlines.slice(0, 3) : [];
+
+  const aiArticles = new Map(
+    (Array.isArray(ai?.articles) ? ai.articles : []).map((a) => [Number(a.universeId), a])
+  );
+
+  const articles = enriched.map((g) => {
+    const a = aiArticles.get(g.universeId);
+
+    return {
+      universeId: g.universeId,
+      gameName: g.name,
+
+      // 신문용 콘텐츠
+      title: (a?.title && String(a.title).trim()) || g.name,
+      oneLiner: (a?.oneLiner && String(a.oneLiner).trim()) || (clampDesc(g.description, 120) ?? "설명이 없습니다."),
+      body:
+        (a?.body && String(a.body).trim()) ||
+        (clampDesc(g.description, 800) ?? "설명이 없습니다."),
+
+      // 근거/팩트(프론트에서 뱃지로 표시)
+      metrics: {
+        playing: g.playing,
+        visits: g.visits,
+        favorites: g.favorites,
+        likeRatio: g.likeRatio,
+        updated: g.updated,
+        genre: g.genre,
+        maxPlayers: g.maxPlayers,
+      },
+
+      // 원문 보존 (검증/디버깅용)
+      descriptionSource: g.description ?? null,
+    };
   });
 
   return {
     generatedAt: new Date().toISOString(),
     meta: { sortName: picked.sortName, sortId: picked.sortId },
-    top5: enriched,
-    ai: { summary: aiText, model: "gpt-5" },
+
+    // ✅ 새 스키마
+    headlines,
+    articles,
+
+    // (선택) 원래 top5도 유지하고 싶으면 같이 넣어도 됨
+    top5: enriched
   };
 }
 

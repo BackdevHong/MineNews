@@ -30,9 +30,34 @@ export type TopGame = {
 
 type Creator = { id?: number; name?: string; type?: string } | null;
 
+// export type Snapshot = {
+//   generatedAt: string;
+//   meta: { sortName: string; sortId: string };
+//   top5: TopGame[];
+//   ai: { summary: string };
+// };
+
+export type Article = {
+  universeId: number;
+  gameName: string;
+  title: string;
+  oneLiner: string;
+  body: string;
+  metrics: {
+    playing: number | null;
+    visits: number | null;
+    favorites: number | null;
+    likeRatio: number | null;
+    updated: string | null;
+    genre: string | null;
+    maxPlayers: number | null;
+  };
+  descriptionSource: string | null;
+};
+
 export type Snapshot = {
   generatedAt: string;
   meta: { sortName: string; sortId: string };
-  top5: TopGame[];
-  ai: { summary: string };
+  headlines: string[];
+  articles: Article[];
 };
