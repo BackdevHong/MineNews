@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { Snapshot } from "../type/Snapshot";
+import type { Snapshot, RawSnapshot } from "../type/Snapshot";
+import { normalizeSnapshot } from "../lib/normalizeSnapshot";
 
 export function useSnapshot() {
   const [data, setData] = useState<Snapshot | null>(null);
@@ -11,13 +12,12 @@ export function useSnapshot() {
 
     fetch("/api/snapshot/latest")
       .then((res) => {
-        if (!res.ok) {
-          throw new Error(`Snapshot fetch failed (${res.status})`);
-        }
+        if (!res.ok) throw new Error(`Snapshot fetch failed (${res.status})`);
         return res.json();
       })
-      .then((json: Snapshot) => {
-        if (mounted) setData(json);
+      .then((raw: RawSnapshot) => {
+        const normalized = normalizeSnapshot(raw);
+        if (mounted) setData(normalized);
       })
       .catch((e: Error) => {
         if (mounted) setError(e.message);

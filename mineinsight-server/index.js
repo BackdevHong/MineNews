@@ -7,8 +7,9 @@ import path from "node:path";
 import OpenAI from "openai";
 
 const app = express();
-const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
+app.use(express.json({ limit: "2mb" }));
 
+const PORT = process.env.PORT ? Number(process.env.PORT) : 3001;
 const EXPLORE = "https://apis.roblox.com/explore-api/v1";
 const GAMES_V1 = "https://games.roblox.com/v1";
 
@@ -22,11 +23,14 @@ let cachedSnapshot = null;
 let lastUpdated = null;
 let lastError = null;
 
+/* -------------------- fetch helpers -------------------- */
 async function fetchJson(url) {
   const res = await fetch(url, { headers: { Accept: "application/json" } });
   const text = await res.text().catch(() => "");
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${res.statusText}\nURL: ${url}\nBODY: ${text.slice(0, 800)}`);
+    throw new Error(
+      `HTTP ${res.status} ${res.statusText}\nURL: ${url}\nBODY: ${text.slice(0, 800)}`
+    );
   }
   try {
     return text ? JSON.parse(text) : {};
@@ -88,8 +92,17 @@ function compact(n) {
   return String(x);
 }
 
+function clampDesc(s, max = 380) {
+  if (!s) return null;
+  const t = String(s).replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max) + "…" : t;
+}
+
+/* -------------------- explore sorting -------------------- */
 async function findSortWithItems(sessionId) {
-  const sortsPayload = await fetchJson(`${EXPLORE}/get-sorts?sessionId=${encodeURIComponent(sessionId)}`);
+  const sortsPayload = await fetchJson(
+    `${EXPLORE}/get-sorts?sessionId=${encodeURIComponent(sessionId)}`
+  );
   const sorts = extractSorts(sortsPayload);
 
   const score = (s) => {
@@ -112,7 +125,9 @@ async function findSortWithItems(sessionId) {
 
     try {
       const content = await fetchJson(
-        `${EXPLORE}/get-sort-content?sessionId=${encodeURIComponent(sessionId)}&sortId=${encodeURIComponent(sortId)}`
+        `${EXPLORE}/get-sort-content?sessionId=${encodeURIComponent(
+          sessionId
+        )}&sortId=${encodeURIComponent(sortId)}`
       );
       if (isFiltersPayload(content)) continue;
 
@@ -125,47 +140,79 @@ async function findSortWithItems(sessionId) {
   return null;
 }
 
+/* -------------------- games details -------------------- */
 async function batchFetchDetails(universeIds) {
   const ids = universeIds.join(",");
-  const detail = await fetchJson(`${GAMES_V1}/games?universeIds=${encodeURIComponent(ids)}`);
+  const detail = await fetchJson(
+    `${GAMES_V1}/games?universeIds=${encodeURIComponent(ids)}`
+  );
   const list = Array.isArray(detail?.data) ? detail.data : [];
   return new Map(list.map((g) => [g.id, g]));
 }
 
 async function batchFetchVotes(universeIds) {
   const ids = universeIds.join(",");
-  const v = await fetchJson(`${GAMES_V1}/games/votes?universeIds=${encodeURIComponent(ids)}`);
+  const v = await fetchJson(
+    `${GAMES_V1}/games/votes?universeIds=${encodeURIComponent(ids)}`
+  );
   const list = Array.isArray(v?.data) ? v.data : [];
   return new Map(list.map((x) => [x.id, x]));
 }
 
-async function fetchFavoritesCounts(universeIds) {
+async function fetchFavoritesCounts(universeIds, concurrency = 5) {
   const map = new Map();
-  for (const id of universeIds) {
-    try {
-      const fav = await fetchJson(`${GAMES_V1}/games/${encodeURIComponent(id)}/favorites/count`);
-      map.set(id, fav?.favoritesCount ?? fav?.count ?? null);
-    } catch {
-      map.set(id, null);
+  let i = 0;
+
+  async function worker() {
+    while (i < universeIds.length) {
+      const id = universeIds[i++];
+      try {
+        const fav = await fetchJson(
+          `${GAMES_V1}/games/${encodeURIComponent(id)}/favorites/count`
+        );
+        map.set(id, fav?.favoritesCount ?? fav?.count ?? null);
+      } catch {
+        map.set(id, null);
+      }
     }
   }
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(concurrency, universeIds.length) },
+      () => worker()
+    )
+  );
+
   return map;
 }
 
-function clampDesc(s, max = 380) {
-  if (!s) return null;
-  const t = String(s).replace(/\s+/g, " ").trim();
-  return t.length > max ? t.slice(0, max) + "…" : t;
+/* -------------------- OpenAI: summary (JSON schema 그대로) -------------------- */
+function extractTextFromResponse(res) {
+  // 최신 SDK면 res.output_text가 있을 수 있어서 우선 사용
+  if (res?.output_text && typeof res.output_text === "string") {
+    return res.output_text.trim();
+  }
+  // fallback: output 배열에서 텍스트 찾기
+  if (!res || !Array.isArray(res.output)) return "";
+  for (const item of res.output) {
+    if (!Array.isArray(item.content)) continue;
+    for (const c of item.content) {
+      if (c.type === "output_text" && typeof c.text === "string") return c.text.trim();
+      if (c.type === "text" && typeof c.text === "string") return c.text.trim();
+    }
+  }
+  return "";
 }
 
 async function summarizeTop5WithOpenAI({ sortName, sortId, top5 }) {
   const slim = {
     sortName,
     sortId,
-    games: top5.map(g => ({
+    games: top5.map((g) => ({
       universeId: g.universeId,
       name: g.name,
-      description: clampDesc(g.description, 1200), // 본문에 쓸 수 있으니 좀 더 길게
+      description: clampDesc(g.description, 1200),
       playing: g.playing,
       visits: g.visits,
       favorites: g.favorites,
@@ -180,59 +227,132 @@ async function summarizeTop5WithOpenAI({ sortName, sortId, top5 }) {
     model: "gpt-5",
     reasoning: { effort: "low" },
     instructions: `
-너는 Roblox 주간 게임 신문 편집장이다.
+      너는 Roblox 주간 게임 신문 편집장이다.
 
-절대 규칙:
-- 추측/과장/미래예측 금지
-- 제공된 description 텍스트 + 수치만 근거로 작성
-- description에 없는 특징을 만들어내지 말 것
-- 한국어로 작성
+      절대 규칙:
+      - 추측/과장/미래예측 금지
+      - 제공된 description 텍스트 + 수치(metrics)만 근거로 작성
+      - description에 없는 특징을 만들어내지 말 것
+      - 한국어로 작성
+      - 출력은 반드시 JSON만 반환 (설명/코드블록 금지)
 
-출력은 "반드시 JSON만" 반환한다. (설명/코드블록/여는말/닫는말 금지)
+      길이/형식 규칙(매우 중요):
+      - 기사 1개당 전체 분량: 900~1400자(공백 포함) 목표
+      - deck 1문장, lede 2~3문장
+      - sections는 3~4개, 각 section은 2~4문장
+      - numbers에는 제공된 수치만 문장형으로 정리(없으면 '—')
+      - updated/genre/maxPlayers 등이 있으면 본문에 자연스럽게 포함
 
-반환 JSON 스키마:
-{
-  "headlines": ["...", "...", "..."],  // 신문 전체 헤드라인(흥미 유발)
-  "articles": [
-    {
-      "universeId": 0,
-      "gameName": "...",
-      "title": "...",     // 재밌는 기사 제목
-      "oneLiner": "...",  // 한 줄 설명(신문 리드문)
-      "body": "..."       // 본문(2~5문단, 너무 길지 않게)
-    }
-  ]
-}
+      반환 JSON 스키마(반드시 이 키로!):
+      {
+        "headlines": ["...", "...", "..."],
+        "articles": [
+          {
+            "universeId": 0,
+            "gameName": "...",
+            "title": "...",
+            "deck": "...",
+            "lede": "...",
+            "sections": [
+              {"heading":"...", "text":"..."},
+              {"heading":"...", "text":"..."},
+              {"heading":"...", "text":"..."}
+            ],
+            "whyNow": "...",
+            "numbers": ["...", "...", "..."],
+            "whatToDo": "..."
+          }
+        ]
+      }
 
-작성 팁:
-- title은 신문 제목처럼 짧고 임팩트 있게(말장난/비유 가능, 그러나 과장 금지)
-- oneLiner는 description을 한 줄로 압축(핵심 장르/플레이 경험)
-- body는 description에서 뽑은 요소들을 신문 톤으로 정리(게임 소개 + 특징 + 플레이 포인트)
-`.trim(),
+      작성 팁:
+      - title은 신문 헤드라인처럼 짧고 강하게(말장난/비유 가능, 과장 금지)
+      - whyNow는 '설명에서 드러나는 특징' + '수치'로만 서술
+      - whatToDo는 설명에 있는 플레이 방식/목표/콘텐츠를 바탕으로 추천 대상/플레이 포인트를 정리
+    `.trim(),
     input: [{ role: "user", content: JSON.stringify(slim) }],
   });
 
   const raw = extractTextFromResponse(res);
 
   if (!raw) {
-    console.warn("⚠️ AI JSON empty:", { status: res?.status, incomplete: res?.incomplete_details, usage: res?.usage });
+    console.warn("⚠️ AI JSON empty:", {
+      status: res?.status,
+      incomplete: res?.incomplete_details,
+      usage: res?.usage,
+    });
     return null;
   }
 
-  // ✅ JSON 파싱/검증
   let parsed;
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    console.error("❌ AI JSON parse failed. raw:", raw.slice(0, 500));
+    console.error("❌ AI JSON parse failed. raw:", raw.slice(0, 800));
     return null;
   }
 
-  // 최소 검증
   if (!Array.isArray(parsed?.articles)) return null;
   return parsed;
 }
 
+function validateAiPayload(ai, universeIds) {
+  if (!ai || typeof ai !== "object") return null;
+
+  const headlines = Array.isArray(ai.headlines)
+    ? ai.headlines.map(String).map((s) => s.trim()).filter(Boolean).slice(0, 3)
+    : [];
+
+  const articles = Array.isArray(ai.articles) ? ai.articles : [];
+  if (!articles.length) return null;
+
+  const map = new Map();
+
+  for (const a of articles) {
+    const id = Number(a?.universeId);
+    if (!Number.isFinite(id)) continue;
+
+    const ok =
+      typeof a?.gameName === "string" &&
+      typeof a?.title === "string" &&
+      typeof a?.deck === "string" &&
+      typeof a?.lede === "string" &&
+      Array.isArray(a?.sections) &&
+      a.sections.length >= 3 &&
+      a.sections.length <= 4 &&
+      a.sections.every(
+        (s) => s && typeof s.heading === "string" && typeof s.text === "string"
+      ) &&
+      typeof a?.whyNow === "string" &&
+      Array.isArray(a?.numbers) &&
+      typeof a?.whatToDo === "string";
+
+    if (!ok) continue;
+
+    map.set(id, {
+      universeId: id,
+      gameName: String(a.gameName).trim(),
+      title: String(a.title).trim(),
+      deck: String(a.deck).trim(),
+      lede: String(a.lede).trim(),
+      sections: a.sections.map((s) => ({
+        heading: String(s.heading).trim(),
+        text: String(s.text).trim(),
+      })),
+      whyNow: String(a.whyNow).trim(),
+      numbers: a.numbers.map((x) => String(x).trim()).filter(Boolean),
+      whatToDo: String(a.whatToDo).trim(),
+    });
+  }
+
+  // TOP5 전부 커버 못하면 → 전체를 실패 처리(=전부 fallback)로 안정성 우선
+  const allCovered = universeIds.every((id) => map.has(id));
+  if (!allCovered) return null;
+
+  return { headlines, articleMap: map };
+}
+
+/* -------------------- snapshot file save -------------------- */
 function kstDateKey(d = new Date()) {
   // KST 기준 YYYY-MM-DD
   const kst = new Date(d.getTime() + 9 * 60 * 60 * 1000);
@@ -247,37 +367,16 @@ async function saveSnapshot(payload) {
   await mkdir(dir, { recursive: true });
 
   const dateKey = kstDateKey(new Date(payload.generatedAt));
-
   const latestPath = path.join(dir, "latest.json");
   const datedPath = path.join(dir, `roblox_top5_${dateKey}.json`);
 
-  // 1) 날짜별 스냅샷 (불변)
   await writeFile(datedPath, JSON.stringify(payload, null, 2), "utf-8");
-
-  // 2) latest 갱신
   await writeFile(latestPath, JSON.stringify(payload, null, 2), "utf-8");
 
   return { latestPath, datedPath };
 }
 
-function extractTextFromResponse(res) {
-  if (!res || !Array.isArray(res.output)) return "";
-
-  for (const item of res.output) {
-    if (!Array.isArray(item.content)) continue;
-
-    for (const c of item.content) {
-      if (c.type === "output_text" && typeof c.text === "string") {
-        return c.text.trim();
-      }
-      if (c.type === "text" && typeof c.text === "string") {
-        return c.text.trim();
-      }
-    }
-  }
-  return "";
-}
-
+/* -------------------- snapshot generation -------------------- */
 async function generateSnapshot() {
   // ✅ 핵심: sessionId 하이픈 제거 (400 방지)
   const sessionId = randomUUID().replace(/-/g, "");
@@ -296,11 +395,13 @@ async function generateSnapshot() {
 
   const top5 = topCandidates.slice(0, 5);
   const universeIds = top5.map((x) => x.universeId);
+  const top20Candidates = topCandidates.slice(0, 20);
+  const universeIds20 = top20Candidates.map((x) => x.universeId);
 
   const [detailsMap, votesMap, favMap] = await Promise.all([
     batchFetchDetails(universeIds),
     batchFetchVotes(universeIds),
-    fetchFavoritesCounts(universeIds),
+    fetchFavoritesCounts(universeIds, 5),
   ]);
 
   const enriched = top5.map((x) => {
@@ -318,9 +419,12 @@ async function generateSnapshot() {
 
     return {
       universeId: x.universeId,
+      placeId: d?.rootPlaceId ?? null,  
       name: d?.name ?? x.exploreName ?? "(no name)",
       description: d?.description ?? null,
-      creator: d?.creator ? { id: d.creator.id, name: d.creator.name, type: d.creator.type } : null,
+      creator: d?.creator
+        ? { id: d.creator.id, name: d.creator.name, type: d.creator.type }
+        : null,
       playing,
       visits,
       favorites: fav,
@@ -337,48 +441,73 @@ async function generateSnapshot() {
     };
   });
 
-  // ✅ AI는 "텍스트"가 아니라 "JSON(헤드라인+기사들)"로 받는 걸 권장
-  const ai = await summarizeTop5WithOpenAI({
+  const details20Map = await batchFetchDetails(universeIds20);
+
+  const top20 = top20Candidates.map((x) => {
+    const d = details20Map.get(x.universeId);
+
+    return {
+      universeId: x.universeId,
+      placeId: d?.rootPlaceId ?? null,                // 링크용 (있으면 개꿀)
+      name: d?.name ?? x.exploreName ?? "(no name)",  // 표시용
+      playing: d?.playing ?? x.explorePlaying ?? null // 동접
+    };
+  });
+
+  // ✅ AI: 네 스키마 그대로 받기
+  const aiRaw = await summarizeTop5WithOpenAI({
     sortName: picked.sortName,
     sortId: picked.sortId,
     top5: enriched,
   });
-  // ai 예시: { headlines: string[], articles: [{ universeId, gameName, title, oneLiner, body }] }
 
-  // ✅ AI 실패해도 서비스는 살아야 하니 fallback 준비
-  const headlines = Array.isArray(ai?.headlines) ? ai.headlines.slice(0, 3) : [];
+  const validated = validateAiPayload(aiRaw, enriched.map((g) => g.universeId));
+  const articleMap = validated?.articleMap ?? new Map();
+  const headlines = validated?.headlines?.length ? validated.headlines : [];
 
-  const aiArticles = new Map(
-    (Array.isArray(ai?.articles) ? ai.articles : []).map((a) => [Number(a.universeId), a])
-  );
+  // ✅ AI 실패/누락 대비 fallback도 "같은 스키마"로 생성
+  const fallbackArticle = (g) => ({
+    universeId: g.universeId,
+    gameName: g.name,
+    title: g.name,
+    deck: clampDesc(g.description, 120) ?? "설명이 없습니다.",
+    lede: clampDesc(g.description, 260) ?? "설명이 없습니다.",
+    sections: [
+      {
+        heading: "무엇을 하는 게임인가",
+        text: clampDesc(g.description, 420) ?? "설명이 없습니다.",
+      },
+      {
+        heading: "플레이 포인트",
+        text: "제공된 설명을 바탕으로 핵심 목표/콘텐츠를 확인해보세요.",
+      },
+      {
+        heading: "지표 요약",
+        text: `현재 동접(playing): ${g.playing ?? "—"}, 방문(visits): ${
+          g.visits ?? "—"
+        }, 즐겨찾기(favorites): ${g.favorites ?? "—"}, 좋아요 비율(likeRatio): ${
+          g.likeRatio ?? "—"
+        }`,
+      },
+    ],
+    whyNow: "설명과 지표에서 확인 가능한 범위 내에서만 요약했습니다.",
+    numbers: [
+      `동접(playing): ${g.playing ?? "—"}`,
+      `방문(visits): ${g.visits ?? "—"}`,
+      `즐겨찾기(favorites): ${g.favorites ?? "—"}`,
+      `좋아요 비율(likeRatio): ${g.likeRatio ?? "—"}`,
+      `장르(genre): ${g.genre ?? "—"}`,
+      `최대 인원(maxPlayers): ${g.maxPlayers ?? "—"}`,
+      `업데이트(updated): ${g.updated ?? "—"}`,
+    ],
+    whatToDo: "설명에 적힌 목표와 콘텐츠 흐름을 따라 첫 판을 시작해보세요.",
+  });
 
   const articles = enriched.map((g) => {
-    const a = aiArticles.get(g.universeId);
-
+    const base = articleMap.get(g.universeId) ?? fallbackArticle(g);
     return {
-      universeId: g.universeId,
-      gameName: g.name,
-
-      // 신문용 콘텐츠
-      title: (a?.title && String(a.title).trim()) || g.name,
-      oneLiner: (a?.oneLiner && String(a.oneLiner).trim()) || (clampDesc(g.description, 120) ?? "설명이 없습니다."),
-      body:
-        (a?.body && String(a.body).trim()) ||
-        (clampDesc(g.description, 800) ?? "설명이 없습니다."),
-
-      // 근거/팩트(프론트에서 뱃지로 표시)
-      metrics: {
-        playing: g.playing,
-        visits: g.visits,
-        favorites: g.favorites,
-        likeRatio: g.likeRatio,
-        updated: g.updated,
-        genre: g.genre,
-        maxPlayers: g.maxPlayers,
-      },
-
-      // 원문 보존 (검증/디버깅용)
-      descriptionSource: g.description ?? null,
+      ...base,
+      placeId: g.placeId ?? null, // ✅ 여기!
     };
   });
 
@@ -386,18 +515,21 @@ async function generateSnapshot() {
     generatedAt: new Date().toISOString(),
     meta: { sortName: picked.sortName, sortId: picked.sortId },
 
-    // ✅ 새 스키마
+    // ✅ 프론트는 이 스키마 그대로 사용
     headlines,
     articles,
 
-    // (선택) 원래 top5도 유지하고 싶으면 같이 넣어도 됨
-    top5: enriched
+    // ✅ 팩트/뱃지용 원본(프론트가 필요하면 활용)
+    top5: enriched,
+    top20
   };
 }
 
+/* -------------------- refresh loop -------------------- */
 async function refreshSnapshot() {
   try {
     lastError = null;
+
     const snap = await generateSnapshot();
     cachedSnapshot = snap;
     lastUpdated = new Date().toISOString();
@@ -412,8 +544,9 @@ async function refreshSnapshot() {
     console.error("❌ Snapshot update failed", lastError);
   }
 }
-// 서버 시작 시 1회
+
+/* -------------------- boot -------------------- */
 await refreshSnapshot();
 
-// 매주 월요일 00:05 (서버 시간 기준) — 필요하면 KST로 맞춰서 운영
-cron.schedule("5 0 * * 1", refreshSnapshot);
+// 매주 월요일 00:05 KST
+cron.schedule("5 0 * * 1", refreshSnapshot, { timezone: "Asia/Seoul" });
