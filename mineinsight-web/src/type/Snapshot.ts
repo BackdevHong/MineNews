@@ -39,7 +39,7 @@ export type Snapshot = {
   meta: { sortName: string; sortId: string };
   headlines: string[];
   articles: Article[];
-  top20?: Top20Item[]; // ✅ optional (구버전 snapshot 대응)
+  top100?: Top20Item[]; // ✅ optional (구버전 snapshot 대응)
 };
 
 // ---------------------------------------
@@ -84,7 +84,7 @@ export type RawSnapshot = {
   headlines?: unknown;
   articles?: unknown; // RawAIArticle[]
   top5?: unknown;     // RawGame[]
-  top20?: unknown;    // ✅ 추가
+  top100?: unknown;    // ✅ 추가
 };
 
 export type Top20Item = {

@@ -229,13 +229,13 @@ export default function WeeklyRobloxNewspaperPage() {
         {/* ✅ Left Sidebar: Top 1~20 (클릭해도 모달 안 띄움) */}
         <aside className="hidden lg:block fixed left-6 top-6 bottom-6 w-[260px]">
           <div className="paper p-4 h-full flex flex-col">
-            <div className="section-title">TOP 1–20</div>
+            <div className="section-title">TOP 1–100</div>
             <Divider />
 
             {/* ✅ 리스트가 길면 여기만 스크롤 */}
             <div className="mt-3 flex-1 overflow-y-auto pr-1">
               <ul className="space-y-1.5">
-                {(SNAP.top20 ?? []).map((a, i) => {
+                {(SNAP.top100 ?? []).map((a, i) => {
                   const rank = i + 1;
                   return (
                     <li key={a.universeId}>

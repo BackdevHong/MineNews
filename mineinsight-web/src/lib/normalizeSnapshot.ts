@@ -59,7 +59,7 @@ function normalizeTop20(x: unknown): Top20Item[] {
   }
 
   // 혹시 백엔드가 순서 보장 안 하면 universeId 순이 아니라 원래 순서를 유지
-  return out.slice(0, 20);
+  return out.slice(0, 100);
 }
 
 export function normalizeSnapshot(raw: RawSnapshot): Snapshot {
@@ -88,7 +88,7 @@ export function normalizeSnapshot(raw: RawSnapshot): Snapshot {
   }
 
   // ✅ top20 normalize (없으면 [])
-  const top20 = normalizeTop20((raw as any)?.top20) ?? [];
+  const top100 = normalizeTop20((raw as any)?.top100) ?? [];
 
   const articlesArr = asArr(raw?.articles);
   const articles: Article[] = [];
@@ -150,5 +150,5 @@ export function normalizeSnapshot(raw: RawSnapshot): Snapshot {
     });
   }
 
-  return { generatedAt, meta, headlines, articles, top20 };
+  return { generatedAt, meta, headlines, articles, top100 };
 }

@@ -19,6 +19,8 @@ if (!process.env.OPENAI_API_KEY) {
 }
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+const ROBLOX_BATCH_LIMIT = 25;
+
 let cachedSnapshot = null;
 let lastUpdated = null;
 let lastError = null;
@@ -142,21 +144,33 @@ async function findSortWithItems(sessionId) {
 
 /* -------------------- games details -------------------- */
 async function batchFetchDetails(universeIds) {
-  const ids = universeIds.join(",");
-  const detail = await fetchJson(
-    `${GAMES_V1}/games?universeIds=${encodeURIComponent(ids)}`
-  );
-  const list = Array.isArray(detail?.data) ? detail.data : [];
-  return new Map(list.map((g) => [g.id, g]));
+  const out = new Map();
+
+  for (const idsChunk of chunk(universeIds, ROBLOX_BATCH_LIMIT)) {
+    const ids = idsChunk.join(",");
+    const detail = await fetchJson(
+      `${GAMES_V1}/games?universeIds=${encodeURIComponent(ids)}`
+    );
+    const list = Array.isArray(detail?.data) ? detail.data : [];
+    for (const g of list) out.set(g.id, g);
+  }
+
+  return out;
 }
 
 async function batchFetchVotes(universeIds) {
-  const ids = universeIds.join(",");
-  const v = await fetchJson(
-    `${GAMES_V1}/games/votes?universeIds=${encodeURIComponent(ids)}`
-  );
-  const list = Array.isArray(v?.data) ? v.data : [];
-  return new Map(list.map((x) => [x.id, x]));
+  const out = new Map();
+
+  for (const idsChunk of chunk(universeIds, ROBLOX_BATCH_LIMIT)) {
+    const ids = idsChunk.join(",");
+    const v = await fetchJson(
+      `${GAMES_V1}/games/votes?universeIds=${encodeURIComponent(ids)}`
+    );
+    const list = Array.isArray(v?.data) ? v.data : [];
+    for (const x of list) out.set(x.id, x);
+  }
+
+  return out;
 }
 
 async function fetchFavoritesCounts(universeIds, concurrency = 5) {
@@ -185,6 +199,53 @@ async function fetchFavoritesCounts(universeIds, concurrency = 5) {
   );
 
   return map;
+}
+
+async function enrichCandidates(candidates, { favConcurrency = 5 } = {}) {
+  const universeIds = candidates.map((x) => x.universeId);
+
+  const [detailsMap, votesMap, favMap] = await Promise.all([
+    batchFetchDetails(universeIds),
+    batchFetchVotes(universeIds),
+    fetchFavoritesCounts(universeIds, favConcurrency),
+  ]);
+
+  return candidates.map((x) => {
+    const d = detailsMap.get(x.universeId);
+    const v = votesMap.get(x.universeId);
+    const fav = favMap.get(x.universeId);
+
+    const up = v?.upVotes ?? null;
+    const down = v?.downVotes ?? null;
+
+    const playing = d?.playing ?? x.explorePlaying ?? null;
+    const visits = d?.visits ?? x.exploreVisits ?? null;
+
+    const ratio = likeRatio(up, down);
+
+    return {
+      universeId: x.universeId,
+      placeId: d?.rootPlaceId ?? null,
+      name: d?.name ?? x.exploreName ?? "(no name)",
+      description: d?.description ?? null,
+      creator: d?.creator
+        ? { id: d.creator.id, name: d.creator.name, type: d.creator.type }
+        : null,
+      playing,
+      visits,
+      favorites: fav,
+      upVotes: up,
+      downVotes: down,
+      likeRatio: ratio == null ? null : Number(ratio.toFixed(6)),
+      created: d?.created ?? null,
+      updated: d?.updated ?? null,
+      maxPlayers: d?.maxPlayers ?? null,
+      genre: d?.genre ?? null,
+      playing_compact: compact(playing),
+      visits_compact: compact(visits),
+      favorites_compact: compact(fav),
+    };
+  });
 }
 
 /* -------------------- OpenAI: summary (JSON schema 그대로) -------------------- */
@@ -378,7 +439,6 @@ async function saveSnapshot(payload) {
 
 /* -------------------- snapshot generation -------------------- */
 async function generateSnapshot() {
-  // ✅ 핵심: sessionId 하이픈 제거 (400 방지)
   const sessionId = randomUUID().replace(/-/g, "");
 
   const picked = await findSortWithItems(sessionId);
@@ -393,79 +453,27 @@ async function generateSnapshot() {
     }))
     .filter((x) => x.universeId);
 
-  const top5 = topCandidates.slice(0, 5);
-  const universeIds = top5.map((x) => x.universeId);
-  const top20Candidates = topCandidates.slice(0, 20);
-  const universeIds20 = top20Candidates.map((x) => x.universeId);
+  const top5Candidates = topCandidates.slice(0, 5);
+  const top100Candidates = topCandidates.slice(0, 100);
 
-  const [detailsMap, votesMap, favMap] = await Promise.all([
-    batchFetchDetails(universeIds),
-    batchFetchVotes(universeIds),
-    fetchFavoritesCounts(universeIds, 5),
-  ]);
+  // ✅ Top5는 기사/헤드라인용 (기존처럼)
+  const top5 = await enrichCandidates(top5Candidates, { favConcurrency: 5 });
 
-  const enriched = top5.map((x) => {
-    const d = detailsMap.get(x.universeId);
-    const v = votesMap.get(x.universeId);
-    const fav = favMap.get(x.universeId);
+  // ✅ Top100은 랭킹/리스트용 (분할 배치로 안전하게)
+  // favorites/count 호출이 100개라 부담되면 favConcurrency를 3~5 추천
+  const top100 = await enrichCandidates(top100Candidates, { favConcurrency: 4 });
 
-    const up = v?.upVotes ?? null;
-    const down = v?.downVotes ?? null;
-
-    const playing = d?.playing ?? x.explorePlaying ?? null;
-    const visits = d?.visits ?? x.exploreVisits ?? null;
-
-    const ratio = likeRatio(up, down);
-
-    return {
-      universeId: x.universeId,
-      placeId: d?.rootPlaceId ?? null,  
-      name: d?.name ?? x.exploreName ?? "(no name)",
-      description: d?.description ?? null,
-      creator: d?.creator
-        ? { id: d.creator.id, name: d.creator.name, type: d.creator.type }
-        : null,
-      playing,
-      visits,
-      favorites: fav,
-      upVotes: up,
-      downVotes: down,
-      likeRatio: ratio == null ? null : Number(ratio.toFixed(6)),
-      created: d?.created ?? null,
-      updated: d?.updated ?? null,
-      maxPlayers: d?.maxPlayers ?? null,
-      genre: d?.genre ?? null,
-      playing_compact: compact(playing),
-      visits_compact: compact(visits),
-      favorites_compact: compact(fav),
-    };
-  });
-
-  const details20Map = await batchFetchDetails(universeIds20);
-
-  const top20 = top20Candidates.map((x) => {
-    const d = details20Map.get(x.universeId);
-
-    return {
-      universeId: x.universeId,
-      placeId: d?.rootPlaceId ?? null,                // 링크용 (있으면 개꿀)
-      name: d?.name ?? x.exploreName ?? "(no name)",  // 표시용
-      playing: d?.playing ?? x.explorePlaying ?? null // 동접
-    };
-  });
-
-  // ✅ AI: 네 스키마 그대로 받기
+  // ✅ AI는 top5만
   const aiRaw = await summarizeTop5WithOpenAI({
     sortName: picked.sortName,
     sortId: picked.sortId,
-    top5: enriched,
+    top5,
   });
 
-  const validated = validateAiPayload(aiRaw, enriched.map((g) => g.universeId));
+  const validated = validateAiPayload(aiRaw, top5.map((g) => g.universeId));
   const articleMap = validated?.articleMap ?? new Map();
   const headlines = validated?.headlines?.length ? validated.headlines : [];
 
-  // ✅ AI 실패/누락 대비 fallback도 "같은 스키마"로 생성
   const fallbackArticle = (g) => ({
     universeId: g.universeId,
     gameName: g.name,
@@ -473,21 +481,11 @@ async function generateSnapshot() {
     deck: clampDesc(g.description, 120) ?? "설명이 없습니다.",
     lede: clampDesc(g.description, 260) ?? "설명이 없습니다.",
     sections: [
-      {
-        heading: "무엇을 하는 게임인가",
-        text: clampDesc(g.description, 420) ?? "설명이 없습니다.",
-      },
-      {
-        heading: "플레이 포인트",
-        text: "제공된 설명을 바탕으로 핵심 목표/콘텐츠를 확인해보세요.",
-      },
+      { heading: "무엇을 하는 게임인가", text: clampDesc(g.description, 420) ?? "설명이 없습니다." },
+      { heading: "플레이 포인트", text: "제공된 설명을 바탕으로 핵심 목표/콘텐츠를 확인해보세요." },
       {
         heading: "지표 요약",
-        text: `현재 동접(playing): ${g.playing ?? "—"}, 방문(visits): ${
-          g.visits ?? "—"
-        }, 즐겨찾기(favorites): ${g.favorites ?? "—"}, 좋아요 비율(likeRatio): ${
-          g.likeRatio ?? "—"
-        }`,
+        text: `현재 동접(playing): ${g.playing ?? "—"}, 방문(visits): ${g.visits ?? "—"}, 즐겨찾기(favorites): ${g.favorites ?? "—"}, 좋아요 비율(likeRatio): ${g.likeRatio ?? "—"}`,
       },
     ],
     whyNow: "설명과 지표에서 확인 가능한 범위 내에서만 요약했습니다.",
@@ -503,25 +501,20 @@ async function generateSnapshot() {
     whatToDo: "설명에 적힌 목표와 콘텐츠 흐름을 따라 첫 판을 시작해보세요.",
   });
 
-  const articles = enriched.map((g) => {
+  const articles = top5.map((g) => {
     const base = articleMap.get(g.universeId) ?? fallbackArticle(g);
-    return {
-      ...base,
-      placeId: g.placeId ?? null, // ✅ 여기!
-    };
+    return { ...base, placeId: g.placeId ?? null };
   });
 
   return {
     generatedAt: new Date().toISOString(),
     meta: { sortName: picked.sortName, sortId: picked.sortId },
 
-    // ✅ 프론트는 이 스키마 그대로 사용
     headlines,
     articles,
 
-    // ✅ 팩트/뱃지용 원본(프론트가 필요하면 활용)
-    top5: enriched,
-    top20
+    top5,
+    top100, // ✅ 추가!
   };
 }
 
@@ -550,3 +543,9 @@ await refreshSnapshot();
 
 // 매주 월요일 00:05 KST
 cron.schedule("5 0 * * 1", refreshSnapshot, { timezone: "Asia/Seoul" });
+
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
