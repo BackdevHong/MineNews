@@ -12,6 +12,8 @@ const THUMB_BASE = "https://thumbnails.roblox.com/v1/games/multiget/thumbnails";
 const thumbCache = new Map(); // key -> { expiresAt, payload }
 const THUMB_TTL_MS = 1000 * 60 * 30; // 30분
 
+app.use(cors());
+
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
