@@ -12,11 +12,12 @@ const THUMB_BASE = "https://thumbnails.roblox.com/v1/games/multiget/thumbnails";
 const thumbCache = new Map(); // key -> { expiresAt, payload }
 const THUMB_TTL_MS = 1000 * 60 * 30; // 30분
 
-app.use(cors({
-  origin: ["https://main.d2mk4w8bg9ail0.amplifyapp.com"],
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+    res.header('Access-Control-Allow-Headers', 'Content-Type');
+    next();
+});
 
 async function listSnapshotFiles() {
   const files = (await fs.readdir(SNAPSHOT_DIR))
