@@ -18,8 +18,6 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
 
-app.options("*", cors());
-
 async function listSnapshotFiles() {
   const files = (await fs.readdir(SNAPSHOT_DIR))
     .filter((f) => f.startsWith("roblox_top5_") && f.endsWith(".json"))
