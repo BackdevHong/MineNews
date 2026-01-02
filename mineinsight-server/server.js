@@ -13,12 +13,7 @@ const THUMB_TTL_MS = 1000 * 60 * 30; // 30분
 
 import cors from "cors";
 
-app.use(cors({
-  origin: [
-    "https://main.d2mk4w8bg9ail0.amplifyapp.com/", // (커스텀 도메인 붙기 전 기본 도메인)
-  ],
-  credentials: true,
-}));
+app.use(cors({ origin: "*" }));
 
 async function listSnapshotFiles() {
   const files = (await fs.readdir(SNAPSHOT_DIR))
