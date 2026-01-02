@@ -1,6 +1,7 @@
 import express from "express";
 import fs from "fs/promises";
 import path from "path";
+import cors from "cors";
 
 const app = express();
 const PORT = 3001;
@@ -11,9 +12,13 @@ const THUMB_BASE = "https://thumbnails.roblox.com/v1/games/multiget/thumbnails";
 const thumbCache = new Map(); // key -> { expiresAt, payload }
 const THUMB_TTL_MS = 1000 * 60 * 30; // 30분
 
-import cors from "cors";
+app.use(cors({
+  origin: ["https://main.d2mk4w8bg9ail0.amplifyapp.com"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
 
-app.use(cors({ origin: "*" }));
+app.options("*", cors());
 
 async function listSnapshotFiles() {
   const files = (await fs.readdir(SNAPSHOT_DIR))
@@ -129,6 +134,7 @@ app.get("/api/thumbnails", async (req, res) => {
     res.status(502).json({ error: "thumbnail proxy failed" });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`✅ API running on http://localhost:${PORT}`);
