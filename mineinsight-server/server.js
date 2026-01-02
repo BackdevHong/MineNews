@@ -129,3 +129,17 @@ app.get("/api/thumbnails", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`✅ API running on http://localhost:${PORT}`);
 });
+
+function logAndExit(sig) {
+  const when = new Date().toISOString();
+  console.error(`[${when}] 🔥 received ${sig}`);
+  console.error(`pid=${process.pid} uptime=${Math.round(process.uptime())}s`);
+  // 어떤 코드가 종료를 유도했는지 힌트가 될 때가 있어서 스택도 남김
+  console.error(new Error(`Signal ${sig} captured`).stack);
+  // PM2가 정상 종료로 보이게끔
+  process.exit(0);
+}
+
+process.on("SIGINT", () => logAndExit("SIGINT"));
+process.on("SIGTERM", () => logAndExit("SIGTERM"));
+process.on("SIGHUP", () => logAndExit("SIGHUP"));
