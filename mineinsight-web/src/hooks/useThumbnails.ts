@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 
-type ThumbItem = { universeId: number; url: string | null };
 type ThumbMap = Record<number, string | null>;
 
 function pickThumbUrl(payload: any, universeId: number): string | null {
